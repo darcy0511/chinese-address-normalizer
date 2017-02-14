@@ -23,9 +23,15 @@ int main() {
 		std::vector<const InfoNode<wchar_t> *> result;
 		int match_len;
 		std::wcin >> s;
-		if (AP.PrefixSearch(s, result, &match_len)) {
-			printf("result count: %d\n", result.size());
-		} else printf("match failed\n");
+		// if (AP.PrefixSearch(s, result, &match_len)) {
+		// 	for (auto &r : result) {
+		// 		r->GetText(s);
+		// 		std::cout << wstring_to_utf81(s) << std::endl;
+		// 	}
+		// 	printf("result count: %d\n", result.size());
+		// } else printf("match failed\n");
+		std::vector<std::wstring> r;
+		AP.Search(s, r);
 	}
 	return 0;
 }
