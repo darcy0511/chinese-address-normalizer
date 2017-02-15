@@ -30,6 +30,7 @@ public:
 	CHAR val;
 	std::vector<const InfoNode<CHAR> *> info_link;
 	bool is_exact;
+	char depth;
 	PrefixNode () {
 		father = NULL;
 		is_exact = false;
@@ -38,6 +39,7 @@ public:
 		val = c;
 		father = f;
 		is_exact = exact;
+		depth = f ? (f->depth + 1) : 0;
 	}
 	~PrefixNode() {
 		for (auto &n : children) {
@@ -142,7 +144,8 @@ public:
 		std::locale loc( "zh_CN.UTF-8" );
 		std::locale::global( loc );
 	}
-	AddrParser(const std::string &fname) {
+	AddrParser(const std::string &fname) :
+		prefix_table(-1, NULL), info_table() {
 		std::locale loc( "zh_CN.UTF-8" );
 		std::locale::global( loc );
 		std::basic_ifstream<CHAR> fin(fname);
@@ -154,9 +157,6 @@ public:
 		char last_level = -1;
 		std::vector<InfoNode<CHAR> *> prev_level_stack(5);
 		InfoNode<CHAR> *node = &info_table;
-		info_table.father = NULL;
-		prefix_table.father = NULL;
-		prefix_table.val = -1;
 		while (getline(fin, s)) {
 			if (s.empty()) continue;
 			int current_level = s[0] - L'a';
@@ -196,14 +196,18 @@ public:
 		return true;
 	}
 	typedef std::pair<std::basic_string<CHAR>, bool> partstype;
-	typedef std::pair<const InfoNode<CHAR> *, int> pathpair;
-	typedef std::vector<pathpair> pathvec;
+	struct pathnode {
+		const InfoNode<CHAR> *node;
+		float score;
+		unsigned int idx;
+	};
+	typedef std::vector<pathnode> pathvec;
 	class pathtype {
 	public:
 		pathvec pv;
 		float score;
 		pathtype() {}
-		pathtype(const pathvec &pv_, const int score_) {
+		pathtype(const pathvec &pv_, const float score_) {
 			pv = pv_;
 			score = score_;
 		}
@@ -218,9 +222,8 @@ public:
 		size_t idx = 0;
 		size_t s_len = s.length();
 		std::vector<partstype> s_parts;
-		std::vector<pathtype> paths;
+		std::vector<pathtype> paths_refer, paths_ans;
 		size_t last_idx = 0;
-		float min_score = -1;
 		while (idx < s_len) {
 			std::vector<const InfoNode<CHAR> *> result_node;
 			int match_len;
@@ -231,31 +234,30 @@ public:
 					s_parts.push_back(partstype(s.substr(last_idx, idx - last_idx), false));
 				}
 				s_parts.push_back(partstype(s.substr(idx, match_len), true));
+				paths_refer = paths_ans;
 				for (const auto &r : result_node) {
-					float score = CalScore(r->depth);
+					float coeff = match_len / float(r->str->depth);
+					float score = CalScore(r->depth, coeff);
 					// save best N candidates
 					// only find the first father
 					bool if_found = false;
-					pathpair cpath(r, s_parts.size() - 1);
-					for (size_t pidx = 0; pidx < paths.size(); ++pidx) {
-						auto &path = paths[pidx].pv;
-						for (int i = path.size() - 1; i >= 0 ; --i) {
-							if (path[i].first->IsFatherOf(r)) {
+					pathnode cpath = {r, coeff, s_parts.size() - 1};
+					for (size_t pidx = 0; pidx < paths_refer.size(); ++pidx) {
+						const auto &path_refer = paths_refer[pidx].pv;
+						for (int i = path_refer.size() - 1; i >= 0 ; --i) {
+							if (path_refer[i].node->IsFatherOf(r)) {
 								if_found = true;
-								if (i == path.size() - 1) {
-									path.push_back(cpath);
-									paths[pidx].score += score;
-									ReSort(paths, pidx);
+								pathvec *tmp = NULL;
+								if (i == path_refer.size() - 1) {
+									score += paths_refer[pidx].score;
 								} else {
 									// new path
-									++i;
-									pathvec *tmp = NULL;
-									for (size_t j = 0; j < i; ++j)
-										score += CalScore(path[j].first->depth);
-									if (PushPath(paths, &tmp, score)) {
-										tmp->insert(tmp->begin(), paths[pidx].pv.begin(), paths[pidx].pv.begin() + i);
-										tmp->push_back(cpath);
-									}
+									for (size_t j = 0; j <= i; ++j)
+										score += path_refer[j].score;
+								}
+								if (PushPath(paths_ans, &tmp, score)) {
+									tmp->insert(tmp->begin(), paths_refer[pidx].pv.begin(), paths_refer[pidx].pv.begin() + i + 1);
+									tmp->push_back(cpath);
 								}
 								break;
 							}
@@ -264,7 +266,7 @@ public:
 					}
 					if (!if_found) {
 						pathvec *tmp = NULL;
-						if (PushPath(paths, &tmp, score)) tmp->push_back(cpath);
+						if (PushPath(paths_ans, &tmp, score)) tmp->push_back(cpath);
 					}
 				}
 				idx += match_len;
@@ -272,29 +274,17 @@ public:
 			} else ++idx;
 		}
 		printf("time: %f ms\n", double(clock() - start) / CLOCKS_PER_SEC * 1000);
-		for (auto &p : paths) {
-			printf("%.2f %s\n", p.score, wstring_to_utf81(p.pv.back().first->print(L"->")).c_str());
+		for (auto &p : paths_ans) {
+			printf("%.2f %s\n", p.score, wstring_to_utf81(p.pv.back().node->print(L"->")).c_str());
+			for (auto cp : p.pv) {
+				printf("%s ", wstring_to_utf81(cp.node->GetText()).c_str());
+			}
+			printf("\n");
 		}
 	}
 private:
-	int CalScore(int depth) {
-		return 1 << (MAX_LEVEL - depth - 1);
-	}
-	void ReSort(std::vector<pathtype> &paths, int idx) {
-		const float c_score = paths[idx].score;
-		int i = idx - 1;
-		for (; i >= 0; --i) {
-			if (paths[i].score >= c_score)
-				break;
-		}
-		++i;
-		if (i == idx) return;// position not changed
-		pathtype bk = paths[idx];
-		while (idx > i) {
-			paths[idx] = paths[idx - 1];
-			--idx;
-		}
-		paths[i] = bk;
+	inline float CalScore(int depth, float coeff) {
+		return (1 << (MAX_LEVEL - depth - 1)) * coeff;
 	}
 	bool PushPath(std::vector<pathtype> &paths, pathvec **pv, float score) {
 		int idx = paths.size();
@@ -306,12 +296,10 @@ private:
 		}
 		++i;
 		if (i == idx) {
-			if (i < MAX_CANDIDATES) {
-				paths.push_back(pathtype());
-				*pv = &(paths.back().pv);
-				paths.back().score = score;
-				return true;
-			} else return false;
+			paths.push_back(pathtype());
+			*pv = &(paths.back().pv);
+			paths.back().score = score;
+			return true;
 		}
 		if (idx < MAX_CANDIDATES) {
 			paths.push_back(pathtype());
