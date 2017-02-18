@@ -11,14 +11,19 @@ using boost::locale::conv::utf_to_utf;
 #include <vector>
 #include <algorithm>
 #include <queue>
+#include "edit_distance.h"
 
+#define MAX_LEVEL 5
 #define MAX_CANDIDATES 5
+#define MAX_GAP_LEVEL1 2
+#define MAX_GAP_LEVEL2 2
 
 // convert wstring to UTF-8 string
-inline std::string wstring_to_utf81 (const std::wstring& str)
+inline std::string wstring_to_utf8 (const std::wstring& str)
 {
 	return utf_to_utf<char>(str.c_str(), str.c_str() + str.size());
 }
+
 template<class CHAR>
 class InfoNode;
 
@@ -123,14 +128,23 @@ public:
 		}
 		return false;
 	}
-	std::basic_string<CHAR> print(const std::basic_string<CHAR> &gap) const {
-		std::basic_string<CHAR> result;
+	void GetAllText(std::vector<std::basic_string<CHAR>> &result) const {
+		result.clear();
 		const InfoNode<CHAR> *node = this;
-		result = node->GetText();
+		result.push_back(node->GetText());
 		while (node->depth) {
 			node = node->father;
-			result = node->GetText() + gap + result;
+			result.push_back(node->GetText());
 		}
+		std::reverse(result.begin(), result.end());
+	}
+	std::basic_string<CHAR> print(const std::basic_string<CHAR> &gap) const {
+		std::basic_string<CHAR> result;
+		std::vector<std::basic_string<CHAR>> resultvec;
+		GetAllText(resultvec);
+		result = resultvec[0];
+		for (size_t i = 1; i < resultvec.size(); ++i)
+			result += gap + resultvec[i];
 		return result;
 	}
 };
@@ -199,7 +213,7 @@ public:
 	struct pathnode {
 		const InfoNode<CHAR> *node;
 		float score;
-		unsigned int idx;
+		size_t idx;
 	};
 	typedef std::vector<pathnode> pathvec;
 	class pathtype {
@@ -229,62 +243,144 @@ public:
 			int match_len;
 			std::basic_string<CHAR> subs = s.substr(idx, s_len);
 			if (PrefixSearch(subs, result_node, &match_len)) {
-				if (last_idx != idx) {
-					// push unfound string
-					s_parts.push_back(partstype(s.substr(last_idx, idx - last_idx), false));
-				}
-				s_parts.push_back(partstype(s.substr(idx, match_len), true));
 				paths_refer = paths_ans;
+				bool is_skip = false;
 				for (const auto &r : result_node) {
+					char ref_depth = r->depth;
 					float coeff = match_len / float(r->str->depth);
-					float score = CalScore(r->depth, coeff);
+					float score = CalScore(ref_depth, coeff);
 					// save best N candidates
 					// only find the first father
 					bool if_found = false;
-					pathnode cpath = {r, coeff, s_parts.size() - 1};
+					pathnode cpath = {r, coeff, s_parts.size() + (last_idx != idx)};
 					for (size_t pidx = 0; pidx < paths_refer.size(); ++pidx) {
-						const auto &path_refer = paths_refer[pidx].pv;
+						const auto &pr = paths_refer[pidx];
+						const auto &path_refer = pr.pv;
 						for (int i = path_refer.size() - 1; i >= 0 ; --i) {
-							if (path_refer[i].node->IsFatherOf(r)) {
+							if (ref_depth - path_refer[i].node->depth <= MAX_GAP_LEVEL1 && path_refer[i].node->IsFatherOf(r)) {
 								if_found = true;
 								pathvec *tmp = NULL;
 								if (i == path_refer.size() - 1) {
-									score += paths_refer[pidx].score;
+									score += pr.score;
+									// TODO remove this fathers
+									size_t update_idx;
+									if (FindPath(path_refer, paths_ans, &update_idx)) {
+										paths_ans[update_idx].pv.push_back(cpath);
+										paths_ans[update_idx].score = score;
+										ReSort(paths_ans, update_idx);
+									} else {
+										PushPath(paths_ans, &tmp, score);
+										tmp->insert(tmp->begin(), pr.pv.begin(), pr.pv.begin() + i + 1);
+										tmp->push_back(cpath);
+									}
+									is_skip = true;
 								} else {
 									// new path
 									for (size_t j = 0; j <= i; ++j)
 										score += path_refer[j].score;
-								}
-								if (PushPath(paths_ans, &tmp, score)) {
-									tmp->insert(tmp->begin(), paths_refer[pidx].pv.begin(), paths_refer[pidx].pv.begin() + i + 1);
-									tmp->push_back(cpath);
+									if (PushPath(paths_ans, &tmp, score)) {
+										tmp->insert(tmp->begin(), pr.pv.begin(), pr.pv.begin() + i + 1);
+										tmp->push_back(cpath);
+										is_skip = true;
+									}
 								}
 								break;
 							}
 						}
 						if (if_found) break;
 					}
-					if (!if_found) {
+					if (!if_found && ref_depth <= MAX_GAP_LEVEL2) {
 						pathvec *tmp = NULL;
-						if (PushPath(paths_ans, &tmp, score)) tmp->push_back(cpath);
+						if (PushPath(paths_ans, &tmp, score)) {
+							tmp->push_back(cpath);
+							is_skip = true;
+						}
 					}
 				}
-				idx += match_len;
-				last_idx = idx;
+				if (is_skip) {
+					if (last_idx != idx) {
+						// push unfound string
+						s_parts.push_back(partstype(s.substr(last_idx, idx - last_idx), true));
+					}
+					s_parts.push_back(partstype(s.substr(idx, match_len), false));
+					idx += match_len;
+					last_idx = idx;
+				} else ++idx;
 			} else ++idx;
 		}
-		printf("time: %f ms\n", double(clock() - start) / CLOCKS_PER_SEC * 1000);
-		for (auto &p : paths_ans) {
-			printf("%.2f %s\n", p.score, wstring_to_utf81(p.pv.back().node->print(L"->")).c_str());
-			for (auto cp : p.pv) {
-				printf("%s ", wstring_to_utf81(cp.node->GetText()).c_str());
+		size_t best_idx = 0;
+		float best_score = 0;
+		for (size_t i = 0; i < paths_ans.size(); ++i) {
+			char last_depth = 0;
+			const auto &p = paths_ans[i].pv;
+			float c_score = paths_ans[i].score;
+			for (size_t j = 0; j < p.size(); ++j) {
+				const InfoNode<CHAR>* node = p[j].node;
+				std::basic_string<CHAR> s1;
+				float base_score = 0;
+				while (node->depth > last_depth) {
+					node = node->father;
+					base_score += 1 << (MAX_CANDIDATES - node->depth - 1);
+					s1 = node->GetText() + s1;
+				}
+				if (!s1.empty()) {
+					int start_idx = j ? (p[j - 1].idx + 1) : 0;
+					std::basic_string<CHAR> s2;
+					for (size_t h = start_idx; h < p[j].idx; ++h) {
+						if (s_parts[h].second) {
+							s2 = s_parts[h].first;
+							c_score += base_score * (1 - levenshteinSSE::levenshtein(s1, s2) / float(s1.length()));
+							if (c_score > best_score) {
+								best_score = c_score;
+								best_idx = i;
+							}
+							break;
+						}
+					}
+				}
+				last_depth = p[j].node->depth + 1;
 			}
-			printf("\n");
+			if (c_score > best_score) {
+				best_score = c_score;
+				best_idx = i;
+			}
+		}
+		printf("time: %f ms\n", double(clock() - start) / CLOCKS_PER_SEC * 1000);
+		// for (auto &p : paths_ans) {
+		// 	printf("DEBUG: %.2f %s\nDEBUG: ", p.score, wstring_to_utf8(p.pv.back().node->print(L"->")).c_str());
+		// 	for (auto cp : p.pv) {
+		// 		printf("%s ", wstring_to_utf8(cp.node->GetText()).c_str());
+		// 	}
+		// 	printf("\n");
+		// }
+		if (paths_ans.size()) {
+			paths_ans[best_idx].pv.back().node->GetAllText(result);
+			std::basic_string<CHAR> left_str;
+			for (size_t i = paths_ans[best_idx].pv.back().idx + 1; i < s_parts.size(); ++i)
+				left_str += s_parts[i].first;
+			if (last_idx < s_len) left_str += s.substr(last_idx, s_len);
+			result.push_back(left_str);
 		}
 	}
 private:
 	inline float CalScore(int depth, float coeff) {
 		return (1 << (MAX_LEVEL - depth - 1)) * coeff;
+	}
+	void ReSort(std::vector<pathtype> &paths, int idx) {
+		const float c_score = paths[idx].score;
+		int i = idx - 1;
+		for (; i >= 0; --i) {
+			if (paths[i].score >= c_score)
+				break;
+		}
+		++i;
+		if (i == idx) return;// position not changed
+		pathtype bk = paths[idx];
+		while (idx > i) {
+			paths[idx] = paths[idx - 1];
+			--idx;
+		}
+		paths[i] = bk;
 	}
 	bool PushPath(std::vector<pathtype> &paths, pathvec **pv, float score) {
 		int idx = paths.size();
@@ -314,5 +410,25 @@ private:
 		*pv = &(paths[i].pv);
 		(*pv)->clear();
 		return true;
+	}
+	bool FindPath(const pathvec &pv, const std::vector<pathtype> &paths, size_t *update_idx) {
+		size_t pv_size = pv.size();
+		for (size_t i = 0; i < paths.size(); ++i) {
+			const auto &dst_pv = paths[i].pv;
+			if (pv_size == dst_pv.size()) {
+				bool found = true;
+				for (size_t j = 0; j < pv_size; ++j) {
+					if (dst_pv[j].node != pv[j].node) {
+						found = false;
+						break;
+					}
+				}
+				if (found) {
+					*update_idx = i;
+					return true;
+				}
+			}
+		}
+		return false;
 	}
 };

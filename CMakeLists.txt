@@ -1,0 +1,4 @@
+SET(SRC_LIST main.cpp)
+
+ADD_EXECUTABLE(main ${SRC_LIST})
+SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
