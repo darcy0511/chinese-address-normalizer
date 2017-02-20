@@ -6,12 +6,11 @@ int main(int argc, char **argv) {
 		fname = "addr_5level.txt";
 	} else fname = argv[1];
 	AddrParser<wchar_t> AP(fname);
-	printf("load done!\n");
-	while (true) {
-		std::wstring s;
+	fprintf(stderr, "load done!\n");
+	std::wstring s;
+	while (getline(std::wcin, s)) {
 		std::vector<const InfoNode<wchar_t> *> result;
 		int match_len;
-		std::wcin >> s;
 		std::vector<std::wstring> r;
 		AP.Search(s, r);
 		for (auto &c : r)
